@@ -4,18 +4,44 @@ from torch.utils.data import Dataset
 import torchvision.transforms as transforms
 from torch.utils.data import Subset
 from torchsummary import summary
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import ConfusionMatrixDisplay
 
 import numpy as np
 import csv
 from PIL import Image
+import os
+import random
+import matplotlib.pyplot as plt
 
 from models import VanillaLeNet, CNSteerableLeNet, DNSteerableLeNet, DNRestrictedLeNet
 from utils import *
+from gradcam import *
 #from FRDEEP import FRDEEPF
-from MiraBest import MBFRConfident
+from CRUMB import *
 #from MingoLoTSS import MLFR
 
 # -----------------------------------------------------------------------------
+def set_seed(seed):
+    random.seed(seed)                        # Python built-in
+    np.random.seed(seed)                     # NumPy
+    torch.manual_seed(seed)                  # PyTorch CPU
+    torch.cuda.manual_seed(seed)             # PyTorch GPU
+    torch.cuda.manual_seed_all(seed)         # Multi-GPU
+    torch.backends.cudnn.deterministic = True  # cuDNN deterministic ops
+    torch.backends.cudnn.benchmark = False     # disable auto-tuner
+    torch.use_deterministic_algorithms(True)
+    os.environ['PYTHONHASHSEED'] = str(seed)   # Python hash randomness
+
+def seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+SEED = 123
+set_seed(SEED)
+g = torch.Generator()
+g.manual_seed(SEED)
 # -----------------------------------------------------------------------------
 # extract information from config file:
 
@@ -38,7 +64,7 @@ csvfile        = config_dict['output']['csvfile']
 modfile        = config_dict['output']['modfile']
 
 config         = vars['config'].split('/')[-1][:-4]
-
+indices_path    = f"crumb/crumb_split_{SEED}.pt"
 # -----------------------------------------------------------------------------
 # -----------------------------------------------------------------------------
 
@@ -47,100 +73,185 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 # -----------------------------------------------------------------------------
 # Data loading:
 
-crop     = transforms.CenterCrop(imsize)
-pad      = transforms.Pad((0, 0, 1, 1), fill=0)
-totensor = transforms.ToTensor()
-normalise= transforms.Normalize((config_dict['data']['datamean'],), (config_dict['data']['datastd'],))
+crop      = transforms.CenterCrop(imsize)
+pad       = transforms.Pad((0, 0, 1, 1), fill=0)
+totensor  = transforms.ToTensor()
+normalise = transforms.Normalize((config_dict['data']['datamean'],), (config_dict['data']['datastd'],))
 
-transform = transforms.Compose([
+train_transform = transforms.Compose([
     crop,
     pad,
-    transforms.RandomRotation(360, resample=Image.BILINEAR, expand=False),
+    transforms.RandomRotation(360, interpolation=transforms.InterpolationMode.BILINEAR, expand=False),
+    totensor,
+    normalise,
+])
+test_transform = transforms.Compose([
+    crop,
+    pad,
     totensor,
     normalise,
 ])
 
 
-train_data = locals()[config_dict['data']['dataset']](config_dict['data']['datadir'], train=True, download=True, transform=transform)
+train_raw = locals()[config_dict['data']['dataset']](config_dict['data']['datadir'], train=True, download=True, transform=None)
+test_raw = locals()[config_dict['data']['dataset']](config_dict['data']['datadir'], train=False, download=True, transform=None)
 
-if frac_val>0.:
-    dataset_size = len(train_data)
-    nval = int(frac_val*dataset_size)
+train_raw.data = np.concatenate([train_raw.data, test_raw.data])
+train_raw.targets = list(train_raw.targets) + list(test_raw.targets)
+train_raw.complete_labels = list(train_raw.complete_labels) + list(test_raw.complete_labels)
 
-    indices = list(range(dataset_size))
-    train_indices, val_indices = indices[nval:], indices[:nval]
-
-    train_sampler = Subset(train_data, train_indices)
-    valid_sampler = Subset(train_data, val_indices)
-
-    train_loader = torch.utils.data.DataLoader(train_sampler, batch_size=batch_size, shuffle=True)
-    test_loader = torch.utils.data.DataLoader(valid_sampler, batch_size=batch_size, shuffle=True)
+if os.path.exists(indices_path):
+    splits = torch.load(indices_path, weights_only=False)
+    train_dataset = torch.utils.data.Subset(train_raw, splits["train"])
+    val_dataset   = torch.utils.data.Subset(train_raw, splits["val"])
+    test_dataset  = torch.utils.data.Subset(train_raw, splits["test"])
 else:
-    # setting frac_val to zero will use the test set for validation
-    train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size, shuffle=True)
-    
-    test_data = locals()[config_dict['data']['dataset']](config_dict['data']['datadir'], train=False, download=True, transform=transform)
-    test_loader = torch.utils.data.DataLoader(valid_sampler, batch_size=batch_size, shuffle=True)
+    train_dataset, val_dataset, test_dataset = create_stratified_splits(
+        train_raw, val_size=0.15, test_size=0.15, seed=SEED
+    )
+    torch.save({
+        "train": train_dataset.indices,
+        "val": val_dataset.indices,
+        "test": test_dataset.indices,
+    }, indices_path)
 
+train_dataset = TransformSubset(train_dataset, train_transform)
+val_dataset   = TransformSubset(val_dataset,   test_transform)
+test_dataset  = TransformSubset(test_dataset,  test_transform)
+
+train_loader = torch.utils.data.DataLoader(
+    train_dataset,
+    batch_size=batch_size,
+    shuffle=True,
+    worker_init_fn=seed_worker,
+    generator=g
+)
+
+val_loader = torch.utils.data.DataLoader(
+    val_dataset,
+    batch_size=batch_size,
+    shuffle=False,
+    worker_init_fn=seed_worker
+)
+
+test_loader = torch.utils.data.DataLoader(
+    test_dataset,
+    batch_size=batch_size,
+    shuffle=False,
+    worker_init_fn=seed_worker
+)
 # -----------------------------------------------------------------------------
-
 
 model = locals()[config_dict['model']['base']](1, nclass, imsize+1, kernel_size=5, N=nrot).to(device)
 
-if not quiet:
-    summary(model, (1, imsize+1, imsize+1))
+# if not quiet:
+#     summary(model, (1, imsize+1, imsize+1))
 
-# -----------------------------------------------------------------------------
+# # -----------------------------------------------------------------------------
 
-loss_function = torch.nn.CrossEntropyLoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer, patience=2, factor=0.9)
+# loss_function = torch.nn.CrossEntropyLoss()
+# optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+# scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer, patience=5, factor=0.9)
 
-# -----------------------------------------------------------------------------
-# training loop:
-
-rows = ['epoch', 'train_loss', 'test_loss', 'test_accuracy']
+# # -----------------------------------------------------------------------------
+# # training loop:
+# print("Training Loop")
+# rows = ['epoch', 'train_loss', 'val_loss', 'val_accuracy']
                         
-with open(csvfile, 'w+', newline="") as f_out:
-        writer = csv.writer(f_out, delimiter=',')
-        writer.writerow(rows)
+# with open(csvfile, 'w+', newline="") as f_out:
+#         writer = csv.writer(f_out, delimiter=',')
+#         writer.writerow(rows)
  
-_bestacc = 0.
-for epoch in range(epochs):  # loop over the dataset multiple times
+# best_loss = float("inf")
+# best_acc = 0.0
+# best_epoch = 0
+# patience = 50
+# patience_counter = 0
+# min_delta = 1e-4
+# for epoch in range(epochs):  # loop over the dataset multiple times
     
-    train_loss = train(model, train_loader, optimizer, device)
-    test_loss, accuracy = test(model, test_loader, device)
+#     train_loss = train(model, train_loader, optimizer, device)
+#     val_loss, val_acc = test(model, val_loader, device)
         
-    scheduler.step(test_loss)
+#     scheduler.step(val_loss)
 
-    # check early stopping criteria:
-    if early_stopping and accuracy>_bestacc:
-        _bestacc = accuracy
-        torch.save(model.state_dict(), modfile)
-        best_acc = accuracy
-        best_epoch = epoch
+#     # check early stopping criteria:
+#     if val_loss < best_loss - min_delta:
+#         best_loss = val_loss
+#         best_acc = val_acc
+#         best_epoch = epoch
+
+#         patience_counter = 0
+#         torch.save(model.state_dict(), modfile)
+
+#     else:
+#         patience_counter += 1
+
+#         if early_stopping and patience_counter >= patience:
+#             print(f"Early stopping at epoch {epoch}")
+#             break
         
-    # create output row:
-    _results = [epoch, train_loss, test_loss, accuracy]
+#     # create output row:
+#     _results = [epoch, train_loss, val_loss, val_acc]
     
-    with open(csvfile, 'a', newline="") as f_out:
-        writer = csv.writer(f_out, delimiter=',')
-        writer.writerow(_results)
+#     with open(csvfile, 'a', newline="") as f_out:
+#         writer = csv.writer(f_out, delimiter=',')
+#         writer.writerow(_results)
             
-    if not quiet:
-        print('Epoch: {}, Validation Loss: {:4f}, Validation Accuracy: {:4f}'.format(epoch, test_loss, accuracy))
-        print('Current learning rate is: {}'.format(optimizer.param_groups[0]['lr']))
+#     if not quiet:
+#         print('Epoch: {}, Validation Loss: {:4f}, Validation Accuracy: {:4f}'.format(epoch, val_loss, val_acc))
+#         print('Current learning rate is: {}'.format(optimizer.param_groups[0]['lr']))
         
-print("Final validation error: ",100.*(1 - accuracy))
-if early_stopping:
-    print("Best validation error: ",100.*(1 - best_acc)," @ epoch: "+str(best_epoch))
+# if early_stopping:
+#     print(
+#         f"Best validation accuracy: {best_acc:.4f} "
+#         f"(loss={best_loss:.4f}) @ epoch {best_epoch}"
+#     )
+#     model.load_state_dict(torch.load(modfile))
+# else:
+#     print(f"Final validation accuracy: {val_acc:.4f}")
 
+model.load_state_dict(torch.load(modfile))
+test_loss, test_acc = test(model, test_loader, device)
+print("Final Test Accuracy:", test_acc)
 
+cm = custom_cm(model, test_loader, device)
+disp = ConfusionMatrixDisplay(
+    confusion_matrix=cm,
+    display_labels=["FRI", "FRII"]
+)
+
+disp.plot(cmap="Blues")
+# plt.savefig(f"final_lenet_{SEED}_cm.png")
+plt.show()
 # -----------------------------------------------------------------------------
 # create outputs:
 
-if not early_stopping:
-    torch.save(model.state_dict(), modfile)
+# if not early_stopping:
+#     torch.save(model.state_dict(), modfile)
+
+# -----------------------------------------------------------------------------
+# gradcam result
+
+# model.eval()
+# all_preds, all_labels = [], []
+# with torch.no_grad():
+#     for imgs, labels in test_loader:
+#         imgs = imgs.to(device)
+#         preds = model(imgs).argmax(dim=1).cpu()
+#         all_preds.extend(preds.tolist())
+#         all_labels.extend(labels.tolist())
+
+# all_preds = np.array(all_preds)
+# all_labels = np.array(all_labels)
+
+# correct_idx   = np.where(all_preds == all_labels)[0][:4]
+# incorrect_idx = np.where(all_preds != all_labels)[0][:4]
+
+# print("Correct examples:", correct_idx)
+# print("Incorrect examples:", incorrect_idx)
+
+# visualize_gradcam_ecnn(model, test_dataset, list(correct_idx) + list(incorrect_idx), device)
 
 
 # -----------------------------------------------------------------------------

@@ -29,6 +29,7 @@ class VanillaLeNet(nn.Module):
         
         # dummy parameter for tracking device
         self.dummy = nn.Parameter(torch.empty(0))
+        self.feature_maps = None
         
     def loss(self,p,y):
         
@@ -60,6 +61,8 @@ class VanillaLeNet(nn.Module):
         x = F.max_pool2d(x, 2)
         x = F.relu(self.conv2(x))
         x = F.max_pool2d(x, 2)
+        
+        self.feature_maps = x
         
         x = x.view(x.size()[0], -1)
         
@@ -186,6 +189,7 @@ class DNSteerableLeNet(nn.Module):
         
         # dummy parameter for tracking device
         self.dummy = nn.Parameter(torch.empty(0))
+        self.feature_maps = None
         
     def loss(self,p,y):
         
@@ -219,6 +223,8 @@ class DNSteerableLeNet(nn.Module):
         
         x = self.gpool(x)
         x = x.tensor
+        
+        self.feature_maps = x
         
         x = x.view(x.size()[0], -1)
         

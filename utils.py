@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from sklearn.metrics import confusion_matrix
 
 import argparse
 import configparser as ConfigParser
@@ -11,9 +12,66 @@ import numpy as np
 import pylab as pl
 import pandas as pd
 from matplotlib.offsetbox import (OffsetImage, AnnotationBbox)
+from sklearn.model_selection import train_test_split
+from torch.utils.data import Subset
 
 # ----------------------------------------------------------
 
+class TransformSubset(Subset):
+    def __init__(self, subset, transform):
+        super().__init__(subset.dataset, subset.indices)
+        self.transform = transform
+
+    def __getitem__(self, idx):
+        img, label = self.dataset[self.indices[idx]]
+        if self.transform:
+            img = self.transform(img)
+        return img, label
+
+    def __getitems__(self, indices):
+        return [self.__getitem__(idx) for idx in indices]
+
+def create_stratified_splits(dataset, val_size=0.15, test_size=0.15, seed=42):
+    """
+    Creates train/val/test splits while preserving:
+    - FRI / FRII balance
+    - Parent dataset balance (MiraBest, FR-DEEP, AT17, Hybrid)
+    """
+
+    labels = np.array(dataset.targets)
+    complete = np.array(dataset.complete_labels)
+
+    origins = np.argmax(complete >= 0, axis=1)
+
+    strat = np.array([
+        f"{y}_{o}"
+        for y, o in zip(labels, origins)
+    ])
+
+    indices = np.arange(len(dataset))
+
+    train_idx, temp_idx = train_test_split(
+        indices,
+        test_size=(val_size + test_size),
+        stratify=strat,
+        random_state=seed
+    )
+
+    temp_strat = strat[temp_idx]
+
+    val_idx, test_idx = train_test_split(
+        temp_idx,
+        test_size=test_size / (val_size + test_size),
+        stratify=temp_strat,
+        random_state=seed
+    )
+
+    train_dataset = Subset(dataset, train_idx)
+    val_dataset = Subset(dataset, val_idx)
+    test_dataset = Subset(dataset, test_idx)
+
+    return train_dataset, val_dataset, test_dataset
+    
 def parse_args():
     """
         Parse the command line arguments
@@ -29,7 +87,7 @@ def parse_args():
 
 def parse_config(filename):
     
-    config = ConfigParser.SafeConfigParser(allow_no_value=True)
+    config = ConfigParser.ConfigParser(allow_no_value=True)
     config.read(filename)
     
     # Build a nested dictionary with tasknames at the top level
@@ -116,6 +174,51 @@ def test(model, testloader, device):
 
     return test_loss, accuracy
 
+def evaluate(model, testloader, device):
+
+    all_preds = []
+    all_labels = []
+
+    model.eval()
+
+    with torch.no_grad():
+        for data, labels in testloader:
+
+            data = data.to(device)
+
+            p_y = F.softmax(model(data), dim=1)
+
+            preds = p_y.argmax(dim=1)
+
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(labels.numpy())
+
+    return np.array(all_preds), np.array(all_labels)
+
+def custom_cm(model, testloader, device):
+
+    all_preds = []
+    all_labels = []
+
+    model.eval()
+
+    with torch.no_grad():
+        for data, labels in testloader:
+
+            data = data.to(device)
+
+            outputs = F.softmax(model(data), dim=1)
+
+            preds = outputs.argmax(dim=1)
+
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(labels.numpy())
+
+    cm = confusion_matrix(all_labels, all_preds)
+
+    print(cm)
+
+    return cm
 # -----------------------------------------------------------------------------
 
 def test_mc(model, testloader, device, T=100):
