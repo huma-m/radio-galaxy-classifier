@@ -1,0 +1,10 @@
+.venv/
+__pycache__
+__pycache__/
+*.pyc
+.vscode/
+RadioGalaxyData/
+visualisations/
+metrics/
+rotation_test.py
+plots.py

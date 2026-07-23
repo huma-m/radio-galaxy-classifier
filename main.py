@@ -1,10 +1,7 @@
 import torch
 
-from torch.utils.data import Dataset
 import torchvision.transforms as transforms
-from torch.utils.data import Subset
 from torchsummary import summary
-from sklearn.model_selection import train_test_split
 from sklearn.metrics import ConfusionMatrixDisplay
 
 import numpy as np
@@ -17,9 +14,7 @@ import matplotlib.pyplot as plt
 from models import VanillaLeNet, CNSteerableLeNet, DNSteerableLeNet, DNRestrictedLeNet
 from utils import *
 from gradcam import *
-#from FRDEEP import FRDEEPF
-from CRUMB import *
-#from MingoLoTSS import MLFR
+from RadioGalaxyData.firstgalaxydata import FIRSTGalaxyData
 
 # -----------------------------------------------------------------------------
 def set_seed(seed):
@@ -38,10 +33,9 @@ def seed_worker(worker_id):
     np.random.seed(worker_seed)
     random.seed(worker_seed)
 
-SEED = 123
-set_seed(SEED)
+set_seed(42)
 g = torch.Generator()
-g.manual_seed(SEED)
+g.manual_seed(42)
 # -----------------------------------------------------------------------------
 # extract information from config file:
 
@@ -64,7 +58,7 @@ csvfile        = config_dict['output']['csvfile']
 modfile        = config_dict['output']['modfile']
 
 config         = vars['config'].split('/')[-1][:-4]
-indices_path    = f"crumb/crumb_split_{SEED}.pt"
+
 # -----------------------------------------------------------------------------
 # -----------------------------------------------------------------------------
 
@@ -73,10 +67,10 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 # -----------------------------------------------------------------------------
 # Data loading:
 
-crop      = transforms.CenterCrop(imsize)
-pad       = transforms.Pad((0, 0, 1, 1), fill=0)
-totensor  = transforms.ToTensor()
-normalise = transforms.Normalize((config_dict['data']['datamean'],), (config_dict['data']['datastd'],))
+crop     = transforms.CenterCrop(imsize)
+pad      = transforms.Pad((0, 0, 1, 1), fill=0)
+totensor = transforms.ToTensor()
+normalise= transforms.Normalize((config_dict['data']['datamean'],), (config_dict['data']['datastd'],))
 
 train_transform = transforms.Compose([
     crop,
@@ -93,31 +87,15 @@ test_transform = transforms.Compose([
 ])
 
 
-train_raw = locals()[config_dict['data']['dataset']](config_dict['data']['datadir'], train=True, download=True, transform=None)
-test_raw = locals()[config_dict['data']['dataset']](config_dict['data']['datadir'], train=False, download=True, transform=None)
+train_dataset = locals()[config_dict['data']['dataset']](config_dict['data']['datadir'], selected_split="train",
+                    input_data_list=["galaxy_data_h5.h5"],is_PIL=True, is_RGB=False, transform=train_transform)
 
-train_raw.data = np.concatenate([train_raw.data, test_raw.data])
-train_raw.targets = list(train_raw.targets) + list(test_raw.targets)
-train_raw.complete_labels = list(train_raw.complete_labels) + list(test_raw.complete_labels)
+val_dataset = locals()[config_dict['data']['dataset']](config_dict['data']['datadir'], selected_split="valid",
+                    input_data_list=["galaxy_data_h5.h5"],is_PIL=True, is_RGB=False, transform=train_transform)
 
-if os.path.exists(indices_path):
-    splits = torch.load(indices_path, weights_only=False)
-    train_dataset = torch.utils.data.Subset(train_raw, splits["train"])
-    val_dataset   = torch.utils.data.Subset(train_raw, splits["val"])
-    test_dataset  = torch.utils.data.Subset(train_raw, splits["test"])
-else:
-    train_dataset, val_dataset, test_dataset = create_stratified_splits(
-        train_raw, val_size=0.15, test_size=0.15, seed=SEED
-    )
-    torch.save({
-        "train": train_dataset.indices,
-        "val": val_dataset.indices,
-        "test": test_dataset.indices,
-    }, indices_path)
+test_dataset = locals()[config_dict['data']['dataset']](config_dict['data']['datadir'], selected_split="test",
+                    input_data_list=["galaxy_data_h5.h5"],is_PIL=True, is_RGB=False, transform=test_transform)
 
-train_dataset = TransformSubset(train_dataset, train_transform)
-val_dataset   = TransformSubset(val_dataset,   test_transform)
-test_dataset  = TransformSubset(test_dataset,  test_transform)
 
 train_loader = torch.utils.data.DataLoader(
     train_dataset,
@@ -144,115 +122,97 @@ test_loader = torch.utils.data.DataLoader(
 
 model = locals()[config_dict['model']['base']](1, nclass, imsize+1, kernel_size=5, N=nrot).to(device)
 
-# if not quiet:
-#     summary(model, (1, imsize+1, imsize+1))
+if not quiet:
+    summary(model, (1, imsize+1, imsize+1))
 
-# # -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 
-# loss_function = torch.nn.CrossEntropyLoss()
-# optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-# scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer, patience=5, factor=0.9)
+loss_function = torch.nn.CrossEntropyLoss()
+optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay.item())
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer, patience=5, factor=0.9)
 
-# # -----------------------------------------------------------------------------
-# # training loop:
-# print("Training Loop")
-# rows = ['epoch', 'train_loss', 'val_loss', 'val_accuracy']
+# -----------------------------------------------------------------------------
+# training loop:
+print("Training Loop")
+rows = ['epoch', 'train_loss', 'val_loss', 'val_accuracy']
                         
-# with open(csvfile, 'w+', newline="") as f_out:
-#         writer = csv.writer(f_out, delimiter=',')
-#         writer.writerow(rows)
+with open(csvfile, 'w+', newline="") as f_out:
+        writer = csv.writer(f_out, delimiter=',')
+        writer.writerow(rows)
  
-# best_loss = float("inf")
-# best_acc = 0.0
-# best_epoch = 0
-# patience = 50
-# patience_counter = 0
-# min_delta = 1e-4
-# for epoch in range(epochs):  # loop over the dataset multiple times
+best_loss = float("inf")
+best_acc = 0.0
+best_epoch = 0
+patience = 50
+patience_counter = 0
+min_delta = 1e-4
+for epoch in range(epochs):  # loop over the dataset multiple times
     
-#     train_loss = train(model, train_loader, optimizer, device)
-#     val_loss, val_acc = test(model, val_loader, device)
+    train_loss = train(model, train_loader, optimizer, device)
+    val_loss, val_acc = test(model, val_loader, device)
         
-#     scheduler.step(val_loss)
+    scheduler.step(val_loss)
 
-#     # check early stopping criteria:
-#     if val_loss < best_loss - min_delta:
-#         best_loss = val_loss
-#         best_acc = val_acc
-#         best_epoch = epoch
+    # check early stopping criteria:
+    if val_loss < best_loss - min_delta:
+        best_loss = val_loss
+        best_acc = val_acc
+        best_epoch = epoch
 
-#         patience_counter = 0
-#         torch.save(model.state_dict(), modfile)
+        patience_counter = 0
+        torch.save(model.state_dict(), modfile)
 
-#     else:
-#         patience_counter += 1
+    else:
+        patience_counter += 1
 
-#         if early_stopping and patience_counter >= patience:
-#             print(f"Early stopping at epoch {epoch}")
-#             break
+        if early_stopping and patience_counter >= patience:
+            print(f"Early stopping at epoch {epoch}")
+            break
         
-#     # create output row:
-#     _results = [epoch, train_loss, val_loss, val_acc]
+    # create output row:
+    _results = [epoch, train_loss, val_loss, val_acc]
     
-#     with open(csvfile, 'a', newline="") as f_out:
-#         writer = csv.writer(f_out, delimiter=',')
-#         writer.writerow(_results)
+    with open(csvfile, 'a', newline="") as f_out:
+        writer = csv.writer(f_out, delimiter=',')
+        writer.writerow(_results)
             
-#     if not quiet:
-#         print('Epoch: {}, Validation Loss: {:4f}, Validation Accuracy: {:4f}'.format(epoch, val_loss, val_acc))
-#         print('Current learning rate is: {}'.format(optimizer.param_groups[0]['lr']))
+    if not quiet:
+        print('Epoch: {}, Validation Loss: {:4f}, Validation Accuracy: {:4f}'.format(epoch, val_loss, val_acc))
+        print('Current learning rate is: {}'.format(optimizer.param_groups[0]['lr']))
         
-# if early_stopping:
-#     print(
-#         f"Best validation accuracy: {best_acc:.4f} "
-#         f"(loss={best_loss:.4f}) @ epoch {best_epoch}"
-#     )
-#     model.load_state_dict(torch.load(modfile))
-# else:
-#     print(f"Final validation accuracy: {val_acc:.4f}")
+if early_stopping:
+    print(
+        f"Best validation accuracy: {best_acc:.4f} "
+        f"(loss={best_loss:.4f}) @ epoch {best_epoch}"
+    )
+    model.load_state_dict(torch.load(modfile))
+else:
+    print(f"Final validation accuracy: {val_acc:.4f}")
 
-model.load_state_dict(torch.load(modfile))
-test_loss, test_acc = test(model, test_loader, device)
-print("Final Test Accuracy:", test_acc)
-
-cm = custom_cm(model, test_loader, device)
-disp = ConfusionMatrixDisplay(
-    confusion_matrix=cm,
-    display_labels=["FRI", "FRII"]
-)
-
-disp.plot(cmap="Blues")
-# plt.savefig(f"final_lenet_{SEED}_cm.png")
-plt.show()
 # -----------------------------------------------------------------------------
 # create outputs:
 
-# if not early_stopping:
-#     torch.save(model.state_dict(), modfile)
+if not early_stopping:
+    torch.save(model.state_dict(), modfile)
 
 # -----------------------------------------------------------------------------
-# gradcam result
+# confusion matrix:
 
-# model.eval()
-# all_preds, all_labels = [], []
-# with torch.no_grad():
-#     for imgs, labels in test_loader:
-#         imgs = imgs.to(device)
-#         preds = model(imgs).argmax(dim=1).cpu()
-#         all_preds.extend(preds.tolist())
-#         all_labels.extend(labels.tolist())
+# model.load_state_dict(torch.load(modfile))
+test_loss, test_acc = test(model, test_loader, device)
+print("Final Test Accuracy:", test_acc)
 
-# all_preds = np.array(all_preds)
-# all_labels = np.array(all_labels)
+cm, report = custom_cm(model, test_loader, device)
+disp = ConfusionMatrixDisplay(
+    confusion_matrix=cm,
+    display_labels=train_dataset.selected_classes,
+)
 
-# correct_idx   = np.where(all_preds == all_labels)[0][:4]
-# incorrect_idx = np.where(all_preds != all_labels)[0][:4]
-
-# print("Correct examples:", correct_idx)
-# print("Incorrect examples:", incorrect_idx)
-
-# visualize_gradcam_ecnn(model, test_dataset, list(correct_idx) + list(incorrect_idx), device)
-
+disp.plot(cmap="Blues")
+plt.savefig("FIRST_dnlenet_cm.png")
+plt.show()
+print(report)
+print(cm)
 
 # -----------------------------------------------------------------------------
 # -----------------------------------------------------------------------------

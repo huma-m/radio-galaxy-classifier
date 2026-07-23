@@ -1,63 +1,85 @@
-# E2CNNRadGal
+# Radio Galaxy Morphology Classifier
 
-This code will run in a Python 3.6 or 3.8 environment with all the relevant libraries installed (see requirements.txt). For training the equivariant [models](./models.py) (CNSteerableLeNet, DNSteerableLeNet) you will probably want to use a GPU for speed. For the VanillaLeNet, you're better off on a CPU.
+Automated classification of radio galaxies into four morphological types — **FR-I, FR-II, Compact, and Bent** — using Group-Equivariant Convolutional Neural Networks trained on VLA FIRST survey images.
 
-## Run the code
+**Live demo:** [Hugging Face Spaces](https://huggingface.co/spaces/YOUR_USERNAME/radio-galaxy-classifier)
 
-The input parameters for each run are contained in the configuration files located in the [configs](./configs) directory. To run a particular experiment use:
+---
+
+## What This Does
+
+Radio galaxies are classified by where their radio emission peaks along the jet structure:
+
+| Class | Description |
+|---|---|
+| **FR-I** | Jets brightest near the core, fading outward |
+| **FR-II** | Bright hotspots at lobe edges, fainter core |
+| **Compact** | Unresolved point-like source |
+| **Bent** | Curved jets deflected by cluster environment |
+
+Manual classification at survey scale is infeasible as modern radio surveys contain hundreds of thousands of sources. This project automates the task and provides GradCAM visualisations to verify the model is learning genuine morphological features.
+
+---
+
+## Results
+
+All models trained on 2,158 FIRST survey images (150×150 grayscale).
+
+### 150×150 (native resolution)
+
+| Model | Accuracy | Notes |
+|---|---|---|
+| EfficientNet-B0 | 63% | ImageNet pretraining hurts on single-channel radio data |
+| ResNet-18 | 69% | |
+| DenseNet-121 | 73% | Best pretrained baseline at this resolution |
+| VanillaLeNet | 80% | No pretraining, domain-appropriate architecture |
+| **DNSteerableLeNet** | **81%** | D8-equivariant, best accuracy and stability |
+
+### 225×225 (pretrained CNN optimised resolution)
+
+| Model | Accuracy | Notes |
+|---|---|---|
+| EfficientNet-B0 | 67% | +4% vs 150px |
+| ResNet-18 | 78% | +9% vs 150px |
+| DenseNet-121 | 79% | +6% vs 150px |
+
+**Key finding:** DNSteerableLeNet at 150×150 outperforms all pretrained CNNs even at their optimal 225×225 resolution, despite having fewer parameters and no ImageNet pretraining. The architectural prior (rotational equivariance) outperforms data volume and transfer learning on this task.
+
+**Bent galaxies** are the hardest class across all models — consistently confused with FR-I and FR-II but never with Compact. This is physically sensible: Bent sources are FR galaxies whose jets have been deflected by their environment, making the morphological boundary genuinely ambiguous.
+
+---
+
+## Why Group-Equivariant CNNs
+
+Radio galaxies have no preferred orientation on the sky. A standard CNN must learn rotational invariance from data and with ~1500 training images, it memorises orientations instead of learning morphology, producing a hard ceiling around 63–73%.
+
+DNSteerableLeNet (Scaife & Porter, 2021) encodes **D16 symmetry** (16-fold rotation × reflection) directly into its convolution layers via the `e2cnn` library. The model mathematically treats rotated versions of the same galaxy as identical, without needing to learn this from examples.
+
+---
+
+## GradCAM
+
+Standard GradCAM backward hooks are incompatible with `e2cnn`'s `GeometricTensor` outputs, hooks fire but gradients are `None`. 
+
+The fix: store intermediate feature maps directly during the forward pass (post-GroupPooling, after `.tensor` unwrap) and compute gradients through standard PyTorch autograd without hooks.
 
 ```python
-python main.py --config configs/config_mb_lenet.txt
-```
-An overview of the configuration file format can be found [here](./configs/README.md).
-
-
-## Using a Kaggle kernel
-
-In a Kaggle notebook you can make a local copy of the github repo quickly by running:
-
-```python
-!git clone https://github.com/as595/E2CNNRadGal.git
+# In DNSteerableLeNet.forward()
+x = self.gpool(x)
+x = x.tensor          # unwrap GeometricTensor → plain tensor
+self.feature_maps = x  # store for GradCAM
+x = x.view(x.size()[0], -1)
 ```
 
-The repo will then appear as a folder in the working directory. To run the code as above you will need to import the [e2cnn]() library and the [torchsummary]() library:
+GradCAM is used to visualize the regions of each radio galaxy that contribute most to the model's prediction, helping verify that the network focuses on meaningful morphological structures such as jets, lobe separation, core brightness gradients, rather than image artifacts or background noise.
 
-```python
-!pip install e2cnn
-!pip install torchsummary
-```
+---
 
-```python
-!python main.py --config configs/config_mb_lenet.txt
-```
+## References
 
-or
+**Dataset**
+- RadioGalaxyDataset (Zenodo): https://zenodo.org/records/7351724
 
-```python
-%run main.py --config configs/config_mb_lenet.txt
-```
-
-## Data
-
-Configuration files are provided for experiments using the [MiraBest](https://zenodo.org/record/4288837#.X_XjDC-l3Aw) batched data set. If you use this data set please cite:
-
-* [MiraBest](https://zenodo.org/record/4288837#.X_XjDC-l3Aw) : Fiona Porter, Anna M. M. Scaife et al., **2020** [Zenodo: 10.5281/zenodo.4288837](https://zenodo.org/record/4288837#.X_XjDC-l3Aw)
-
-
-## Rotation Demo 
-
-This demo uses [visualisation code from the E2CNN repo](https://github.com/QUVA-Lab/e2cnn/blob/master/visualizations/animation.py) to show that the inference of an E(2)-steerable CNN is invariant under rotation. The left plot shows a radio galaxy image taken from the MiraBest test sample (#25). The middle plot shows the equivariant transformation of a feature space, consisting of one scalar field (color-coded) and one vector field (arrows), after a few layers. The right plot shows the feature space transformed into a comoving reference frame (stabilized view).
-
-![Equivariant CNN output](https://github.com/as595/E2CNNRadGal/blob/main/visualisations/mbtest_25_mixed.gif)
-
-For comparison, this is the response of a standard CNN:
-
-![Conventional CNN output](https://github.com/as595/E2CNNRadGal/blob/main/visualisations/mbtest_25_scalar.gif)
-
-Since conventional CNNs are not equivariant under rotations, the response varies randomly with the image orientation.
-This prevents CNNs from automatically generalizing learned patterns between different reference frames.
-
-
-## Acknowledgements
-
-The code in this repo makes extensive use of the wonderful `e2cnn` PyTorch extension library: [e2cnn](https://github.com/QUVA-Lab/e2cnn)
+**Models**
+- Scaife & Porter (2021), *Fanaroff–Riley Classification of Radio Galaxies Using Group Equivariant Convolutional Neural Networks:*
+  https://arxiv.org/abs/2102.08252

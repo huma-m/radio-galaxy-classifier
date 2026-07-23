@@ -17,7 +17,7 @@ body::before {
     inset: 0;
     background:
         linear-gradient(rgba(5,8,18,.75), rgba(5,8,18,.75)),
-        url("/gradio_api/file=space_1.jpg") center/cover no-repeat;
+        url("/gradio_api/file=assets/space_1.jpg") center/cover no-repeat;
     z-index: 0;
 }
 
@@ -46,7 +46,7 @@ body::before {
     display: flex !important;
     flex-direction: column !important;
     justify-content: flex-start !important;
-    gap: 18px !important;
+    gap: 15px !important;
     background-color: var(--card-back);
     padding:18px;
     border-radius:15px;
@@ -91,8 +91,15 @@ body::before {
     margin-left: auto;
 }
 
+#model_row{
+    gap: 10px
+}
+#model_dropdown{
+    padding: 0px !important;
+}
+
 #classify-btn{
-    height:46px !important;
+    padding: 0px !important;
     font-size:16px !important;
     background-color: var(--btn-color) !important;
     color: var(--body-text-color) !important;

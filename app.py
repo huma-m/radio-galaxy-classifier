@@ -3,34 +3,37 @@ import torch
 import numpy as np
 import cv2
 from PIL import Image
-import os
 from pathlib import Path
-import sys
 from torchvision.transforms import transforms
 
 from models import DNSteerableLeNet, VanillaLeNet
 from gradcam import GradCAM_ECNN
 
 
-CLASS_NAMES  = ["FRI", "FRII"]
+CLASS_NAMES  = ["FRI", "FRII", "Compact", "Bent"]
 IMSIZE       = 150
 DEVICE       = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
 DATAMEAN     = 0.0026
 DATASTD      = 0.0328
 
 MODEL_PATHS = {
-    "DNSteerableLeNet (G-CNN, recommended)": "models/final_crumb_123_dnlenet.pt",
-    "VanillaLeNet (baseline)":               "models/final_crumb_123_lenet.pt",
+    "DNSteerableLeNet (G-CNN)": "models/first_dnlenet.pt",
+    "VanillaLeNet (baseline)": "models/first_lenet.pt",
 }
 
 CLASS_DESC = {
     "FRI": (
-        "**FR-I** — jets brightest near the core, fading outward. "
-        "Associated with lower radio luminosity and denser environments."
+        "**FR-I** — Jets are brightest near the core and fade outward. "
+        "Typically associated with lower radio luminosity."
     ),
     "FRII": (
-        "**FR-II** — bright hotspots at the ends of extended lobes, "
-        "faint core. Higher luminosity, lobes terminate in distinct shock regions."
+        "**FR-II** — Bright hotspots at the ends of extended lobes with an edge-brightened morphology."
+    ),
+    "Compact": (
+        "**Compact** — Radio emission is concentrated into a compact unresolved or barely resolved source with no prominent jet or lobe structure."
+    ),
+    "Bent": (
+        "**Bent** — Radio jets or lobes are curved due to interactions with the surrounding environment, commonly seen in cluster galaxies."
     ),
 }
 
@@ -58,9 +61,9 @@ def load_model(model_name):
     path = MODEL_PATHS[model_name]
     if "DNSteerable" in model_name:
         print("Loading model...")
-        model = DNSteerableLeNet(1, 2, IMSIZE + 1, kernel_size=5, N=16)
+        model = DNSteerableLeNet(1, 4, IMSIZE + 1, kernel_size=5, N=16)
     else:
-        model = VanillaLeNet(1, 2, IMSIZE + 1, kernel_size=5)
+        model = VanillaLeNet(1, 4, IMSIZE + 1, kernel_size=5)
 
     state = torch.load(path, map_location=DEVICE)
     model.load_state_dict(state)
@@ -90,16 +93,10 @@ def predict(image, model_name):
     pred_name = CLASS_NAMES[pred_idx]
     conf = probs[pred_idx] * 100
 
-    full_name = {
-        "FRI": "Fanaroff–Riley Type I",
-        "FRII": "Fanaroff–Riley Type II",
-    }
-
     prediction_html = f"""
     <div class="prediction-card">
         <h3 class="section-title">Prediction</h3>
         <div class="prediction-name">{pred_name}</div>
-        <div class="prediction-type">{full_name[pred_name]}</div>
         <hr>
         <h3 class="section-title">Confidence</h3>
         <div class="confidence-value">{conf:.1f}%</div>
@@ -124,18 +121,34 @@ def predict(image, model_name):
     overlay     = cv2.addWeighted(orig_rgb, 0.55, heatmap_rgb, 0.45, 0)
 
     # ── explanation ──
+    EXPLANATIONS = {
+        "FRI": ["/gradio_api/file=assets/fri1.png", "/gradio_api/file=assets/fri2.png"],
+        "FRII": ["/gradio_api/file=assets/frii1.png", "/gradio_api/file=assets/frii2.png"],
+        "Compact": ["/gradio_api/file=assets/compact1.png", "/gradio_api/file=assets/compact2.png"],
+        "Bent": ["/gradio_api/file=assets/bent1.png", "/gradio_api/file=assets/bent2.png"],
+    }
+    images_html = f"""
+<div style="
+    display:flex;
+    gap:12px;
+    justify-content:center;
+    align-items:center;
+    flex-wrap:wrap;
+">
+    {
+        "".join(
+            f'<img src="{img}" style="width:120px; border-radius:8px;">'
+            for img in EXPLANATIONS[pred_name]
+        )
+    }
+</div>
+"""
     explanation = (
         f"### Predicted: {pred_name} ({conf:.1f}% confidence)\n\n"
         f"{CLASS_DESC[pred_name]}\n\n"
         f"The heatmap shows which pixels most influenced this decision — "
-        f"brighter regions had greater weight. "
-        + (
-            "The model focused on a single dominant brightness region, "
-            "consistent with an FR-I core-brightened morphology."
-            if pred_name == "FRI" else
-            "The model attended to separated bright regions at lobe extremities, "
-            "consistent with FR-II edge-brightened morphology."
-        )
+        f"brighter regions had greater weight.\n\n"
+        f"{images_html}"
     )
     return (
         gr.update(value=prediction_html, visible=True),
@@ -145,16 +158,12 @@ def predict(image, model_name):
 
 
 # ── example images ─────────────────────────────────────────────────────────
-EXAMPLES_FRI = []
-for f in ["examples/fri_1.png", "examples/fri_2.png",]:
-    if os.path.exists(f):
-        EXAMPLES_FRI.append([f])
-EXAMPLES_FRII = []
-for f in ["examples/frii_1.png", "examples/frii_2.png"]:
-    if os.path.exists(f):
-        EXAMPLES_FRII.append([f])
-
-
+EXAMPLES = {
+    "FRI": ["assets/eg_fri1.png", "assets/eg_fri2.png"],
+    "FRII": ["assets/eg_frii1.png", "assets/eg_frii2.png"],
+    "COMPACT": ["assets/eg_compact1.png", "assets/eg_compact2.png"],
+    "BENT": ["assets/eg_bent1.png", "assets/eg_bent2.png"],
+}
 
 # ── UI ─────────────────────────────────────────────────────────────────────
 css = Path("style.css").read_text()
@@ -167,7 +176,7 @@ with gr.Blocks(fill_width=True,) as demo:
     gr.HTML("""
     <div class="navbar">
         <div class="title">
-            <h2 style="margin: 0px;">Radio Galaxy Classifier</h2>
+            <h2 style="margin: 0px;">Radio Galaxy Morphology Classifier</h2>
         </div>
 
         <div class="nav-links">
@@ -190,7 +199,6 @@ with gr.Blocks(fill_width=True,) as demo:
         with gr.Column(scale=1, elem_classes="card"):
 
             gr.Markdown("### Upload Radio Galaxy Image (PNG, JPG, JPEG)", elem_classes="title-text")
-
             image_input = gr.Image(
                 type="numpy",
                 image_mode="L",
@@ -199,35 +207,55 @@ with gr.Blocks(fill_width=True,) as demo:
             )
 
             gr.Markdown("### Select a Model")
-            model_dropdown = gr.Dropdown(
-                choices=list(MODEL_PATHS.keys()),
-                value="DNSteerableLeNet (G-CNN, recommended)",
-                show_label=False,
-                allow_custom_value=False,
-                filterable=False,  
-            )
+            with gr.Row(equal_height=True, elem_id="model_row"):
+                model_dropdown = gr.Dropdown(
+                    choices=list(MODEL_PATHS.keys()),
+                    value="DNSteerableLeNet (G-CNN)",
+                    show_label=False,
+                    allow_custom_value=False,
+                    filterable=False,
+                    elem_id="model_dropdown",
+                    scale=4
+                )
 
-            classify_btn = gr.Button(
-                "Classify",
-                elem_id="classify-btn",
-            )
+                classify_btn = gr.Button(
+                    "Classify",
+                    elem_id="classify-btn",
+                    min_width=100,
+                    scale=1
+                )
 
             
-            if EXAMPLES_FRI and EXAMPLES_FRII:
+            if EXAMPLES:
                 gr.Markdown("### Example Images")
                 with gr.Row():
                     gr.Examples(
-                        examples=EXAMPLES_FRI,
-                        inputs=[image_input, model_dropdown],
+                        examples=EXAMPLES["FRI"],
+                        inputs=[image_input,],
                         examples_per_page=2,
                         label="FRI",
                         elem_id="examples"
                     )
                     gr.Examples(
-                        examples=EXAMPLES_FRII,
-                        inputs=[image_input, model_dropdown],
+                        examples=EXAMPLES["FRII"],
+                        inputs=[image_input,],
                         examples_per_page=2,
                         label="FRII",
+                        elem_id="examples"
+                    )
+                with gr.Row():
+                    gr.Examples(
+                        examples=EXAMPLES["COMPACT"],
+                        inputs=[image_input,],
+                        examples_per_page=2,
+                        label="Compact",
+                        elem_id="examples"
+                    )
+                    gr.Examples(
+                        examples=EXAMPLES["BENT"],
+                        inputs=[image_input,],
+                        examples_per_page=2,
+                        label="Bent",
                         elem_id="examples"
                     )
 
@@ -239,15 +267,14 @@ with gr.Blocks(fill_width=True,) as demo:
             gr.Markdown("### Classification Result", elem_classes="title-text")
                 
             with gr.Row(equal_height=True, elem_classes="pred-row"):
-                with gr.Column(scale=2):
-                    overlay_output = gr.Image(
-                        label="Grad-CAM",
-                        height=320,
-                    )
-                with gr.Column(scale=1):
-                    gr.Markdown("""### Grad-CAM Explanation
-                    Brighter (yellow/red) regions had the greatest influence on the model's prediction, while darker (blue) regions contributed less. The model focuses on the brightest regions of the radio galaxy, which correspond to the core and lobes in FR-I and FR-II morphologies, respectively.
-                    """, elem_classes="gradcam-desc")
+                overlay_output = gr.Image(
+                    label="Grad-CAM",
+                    height=320,
+                    scale=2
+                )
+                gr.Markdown("""### Grad-CAM Explanation
+                Brighter (yellow/red) regions had the greatest influence on the model's prediction, while darker (blue) regions contributed less. The model focuses on the brightest regions of the radio galaxy, which correspond to the core and lobes in FR-I and FR-II morphologies, respectively.
+                """, elem_classes="gradcam-desc", scale=1)
                 
             with gr.Row(equal_height=True, elem_classes="pred-row"):
                 prediction_output = gr.HTML(elem_id="prediction-card", visible=False)
@@ -259,107 +286,55 @@ with gr.Blocks(fill_width=True,) as demo:
 
         with gr.Accordion("Project Notes", open=False, elem_id="project-notes"):
             gr.Markdown("""
-## How This Came Together
+## About the Project
 
-I started this project wanting to do radio source **segmentation** on LoTSS DR3 data —
-drawing masks around blobs of radio emission. I built a preprocessing pipeline, downloaded
-~300 cutouts, generated RMS-threshold masks. It worked, technically. But then I asked myself
-what the model would actually be learning that a simple `pixel > 4σ` threshold wasn't already
-doing. The answer was: not much. Segmentation without expert pixel-level annotations is just
-teaching a model to replicate a threshold.
+This application classifies radio galaxies into four morphological classes using deep learning:
 
-So I pivoted to **morphology classification** — FR-I vs FR-II — which is a problem where
-a model can genuinely learn something a threshold can't tell you.
+- **FRI** – Core-brightened galaxies with jets that fade away from the center.
+- **FRII** – Edge-brightened galaxies with prominent hotspots at the ends of their radio lobes.
+- **Compact** – Small unresolved radio sources without extended jet structures.
+- **Bent** – Galaxies whose jets are curved due to interactions with their surrounding environment.
 
 ---
 
-## The Standard CNN Wall
+## Dataset
 
-I tried ResNet-18, DenseNet-121, EfficientNet-B0. All landed around **64–67% accuracy**,
-barely above chance on a binary task. This confused me for a while. These are strong
-architectures — why were they failing so badly on ~1600 training images?
-
-The answer turned out to be rotational invariance. Radio galaxies have no preferred orientation
-on the sky — an FR-II pointing left and an FR-II pointing right are the same object. A standard
-CNN has to *learn* this from data, which means it needs to see every galaxy at every rotation.
-With 1600 samples, it never gets enough coverage. The model memorises orientations instead of
-learning morphology.
-
-This is the kind of thing that feels obvious in hindsight but took me an embarrassingly long
-time to figure out empirically.
+The model was trained using the RadioGalaxyDataset, a curated dataset containing 2,158 grayscale radio galaxy images from the FIRST (Faint Images of the Radio Sky at Twenty-Centimeters) survey. 
+The dataset combines expert-labelled sources from six published catalogues: MiraBest, Gendre, FRICAT (Capetti et al., 2017b), FR0CAT (Capetti et al., 2017a), Baldi et al. (2018), and Proctor. 
+Each image is labelled as one of four radio galaxy morphologies: FRI, FRII, Compact, or Bent.
 
 ---
 
-## Switching to Group-Equivariant CNNs
+## Model
 
-I found Scaife & Porter (2021), who trained a **Group-Equivariant CNN** (G-CNN) on the
-MiraBest dataset — the same type of data, the same task. Their architecture, DNSteerableLeNet,
-encodes rotational and reflectional symmetry *mathematically* into the convolution layers using
-the `e2cnn` library. The model never has to learn that rotations are equivalent — it already knows.
+Multiple convolutional neural network architectures were evaluated for radio galaxy morphology classification, including **ResNet-18, DenseNet-121, VanillaLeNet,** and **DNSteerableLeNet,** a Group Equivariant CNN based on the work of **Scaife & Porter (2021)**. The final application uses **DNSteerableLeNet**, which achieved the best performance with **81% test accuracy** and a **Macro F1-score of 0.81**.
 
-Switching to this architecture and the CRUMB dataset (a cleaned, cross-matched combination of
-MiraBest, FR-DEEP, and AT17) brought accuracy up to ~73%, with notably **lower variance across
-random seeds** (std 0.025 vs 0.053 for VanillaLeNet). The stability improvement matters as much
-as the accuracy improvement — it means the model is learning something consistent rather than
-fitting whatever rotations happened to land in a particular split.
+The effect of input image resolution was also investigated. Increasing the image size from **150×150** to **225×225** improved the performance of pretrained CNNs, with **ResNet-18** increasing from **69% → 78%** accuracy and **DenseNet-121** from **73% → 79%**. However, the equivariant models showed performance degradation at the higher resolution, indicating that rotationally equivariant feature extraction contributed more to performance than simply increasing input resolution. Therefore, the final model uses the **150×150** input resolution.
 
 ---
 
-## The Dataset Split Problem
+## Error Analysis
 
-CRUMB ships with an official `test_batch`. When I evaluated on it, accuracy dropped to ~53% —
-essentially random. Swapping val and test brought it back to ~80%. Something was wrong with the
-official split.
+While the model performs well overall, some morphologies remain challenging.
 
-After a lot of debugging (pixel statistics, label distributions, per-source-dataset breakdowns,
-even testing if the labels were globally flipped — they weren't), I found the answer visually:
-the official `test_batch` skews toward **morphologically compact sources**, where FR structure
-simply isn't visible at 150×150 pixels. The model learned real morphological features but was
-being tested on images where those features don't appear.
+Typical confusion occurs between:
 
-The fix was to combine all data and re-split with stratification by label × parent-dataset
-origin. This distributes compact and extended sources evenly across train/val/test, giving a
-more honest evaluation. 70–75% accuracy on this harder, full-distribution split is the number
-I report.
+- **Bent ↔ FRI**, as bent jets can closely resemble the edge-darkened jet structures of FR-I galaxies.
+- **Bent ↔ FRII**, when curved lobes or asymmetric hotspots resemble distorted FR-II morphologies.
 
+The Bent class is the most challenging to classify due to its high morphological variability and similarity to both FRI and FRII galaxies. These errors reflect the inherent complexity of radio galaxy morphology rather than simple model failures.
+  
 ---
+  
+## References
 
-## Current State
+**Dataset**
+- RadioGalaxyDataset (Zenodo): https://zenodo.org/records/7351724
 
-The model works. GradCAM shows it's attending to genuine morphological structure — cores,
-jets, lobe separation — rather than noise or image artifacts. The failure cases are
-scientifically interpretable: the model anchors on peak brightness and under-weights faint
-secondary emission, which explains why visually ambiguous sources (the ones human experts also
-disagree on) are where errors concentrate.
-
-73% on the full distribution isn't 94%. The published 94% numbers use Confident-label subsets —
-the easier half of the data. I think reporting honest numbers on the harder full distribution is
-more useful than cherry-picking a subset to match a benchmark.
-
----
-
-## What I'd Try Next
-
-**Fine-grained subtype classification.** CRUMB's complete labels encode morphological subtypes
-within FRI: Standard, Wide-Angle Tail (WAT), Head-Tail (HT). These are physically distinct
-objects. A classifier that distinguishes WAT from standard FRI would be more scientifically
-useful than the binary FRI/FRII split — and nobody has published this on CRUMB specifically.
-
-**Confidence calibration.** The model is sometimes highly confident on wrong predictions.
-Temperature scaling or conformal prediction would give better-calibrated uncertainty estimates,
-which matters if this were ever used in an actual pipeline.
-
-**Cross-survey generalisation.** CRUMB is all FIRST survey data. LoTSS (LOFAR) sees extended
-emission that FIRST misses, which means a model trained on FIRST may systematically
-misclassify sources that look different at 144 MHz. Testing cross-survey transfer would be
-an honest stress test of what the model has actually learned.
-
-**Better handling of the Uncertain label.** The Uncertain sources in MiraBest aren't mislabeled
-— they're genuinely ambiguous, sometimes because the morphology is unclear and sometimes because
-the source is at a redshift where the jets aren't resolved. Treating them the same as Confident
-sources during training adds label noise. A noise-robust loss function or a reject option for
-low-confidence predictions might handle this more honestly.
-    """)
+**Model**
+- Scaife & Porter (2021), *Fanaroff–Riley Classification of Radio Galaxies Using Group Equivariant Convolutional Neural Networks:*
+  https://arxiv.org/abs/2102.08252
+""")
 
     # ==========================================================
     # EVENTS
@@ -377,50 +352,3 @@ low-confidence predictions might handle this more honestly.
         ]
     )
 demo.launch(css=css, footer_links=[], allowed_paths=["assets"])
-# with gr.Blocks(title="Radio Galaxy Classifier") as demo:
-
-#     gr.Markdown("# Radio Galaxy Morphology Classifier", elem_id="title")
-#     gr.Markdown(
-#         "FR-I vs FR-II classification using a Group-Equivariant CNN "
-#         "trained on the [CRUMB dataset](http://www.jb.man.ac.uk/research/MiraBest/CRUMB/) "
-#         "— 2,100 FIRST survey radio galaxies.",
-#         elem_id="subtitle"
-#     )
-
-#     # ── about section ────────────────────────────────────────────────────
-#     with gr.Accordion("About this project", open=False):
-#         gr.Markdown("""
-# **Architecture**
-# Two models are available:
-# - *DNSteerableLeNet* — D8-equivariant G-CNN (Scaife & Porter 2021). Encodes rotational and
-#   reflectional symmetry directly into the convolution layers. Radio galaxies have no preferred
-#   sky orientation, so equivariance is a natural inductive bias.
-# - *VanillaLeNet* — standard LeNet without equivariance, used as a baseline.
-
-# **Dataset — CRUMB**
-# 2,100 FIRST survey radio galaxies, cross-matched from MiraBest, FR-DEEP, AT17 and MiraBest
-# Hybrid. Re-split with stratified 70/15/15 train/val/test to ensure uniform morphological
-# difficulty distribution across splits.
-
-# **Results** (3 seeds, full binary CRUMB)
-
-# | Model | Mean Acc | Std |
-# |---|---|---|
-# | ResNet-18 / DenseNet-121 / EfficientNet-B0 | 0.64–0.67 | high |
-# | VanillaLeNet | 0.722 | 0.053 |
-# | DNSteerableLeNet | 0.730 | 0.025 |
-
-# Pretrained ImageNet CNNs underperform small domain-appropriate architectures on single-channel
-# 150×150 radio images. The G-CNN's main advantage is **stability** (lower variance across seeds),
-# not raw accuracy — consistent with equivariance reducing sensitivity to random split composition.
-
-# **GradCAM**
-# Hooks onto the `GroupPooling` layer of DNSteerableLeNet (last spatial feature map before
-# flattening). Reveals the model anchors on peak brightness and can under-weight faint secondary
-# emission — explaining FRI/FRII confusion on visually ambiguous sources.
-
-# **References**
-# - Fanaroff & Riley (1974) — original FR classification
-# - Scaife & Porter (2021) — G-CNN for radio galaxy classification
-# - Porter & Scaife (2023) — MiraBest / CRUMB dataset paper
-#         """)
