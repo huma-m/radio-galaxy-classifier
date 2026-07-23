@@ -8,7 +8,6 @@ from e2cnn import nn as e2nn
 import utils
 
 
-        
 # -----------------------------------------------------------------------------
 
 class VanillaLeNet(nn.Module):
