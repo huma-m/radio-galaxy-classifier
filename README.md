@@ -2,7 +2,7 @@
 
 Automated classification of radio galaxies into four morphological types — **FR-I, FR-II, Compact, and Bent** — using Group-Equivariant Convolutional Neural Networks trained on VLA FIRST survey images.
 
-**Live demo:** [Hugging Face Spaces](https://huggingface.co/spaces/YOUR_USERNAME/radio-galaxy-classifier)
+**Live demo:** [Hugging Face Spaces](https://huggingface.co/spaces/huma-03/radio-galaxy-classification)
 
 ---
 
